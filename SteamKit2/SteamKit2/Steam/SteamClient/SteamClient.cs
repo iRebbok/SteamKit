@@ -12,6 +12,7 @@ using System.Collections.Specialized;
 using System.Diagnostics;
 using System.Linq;
 using System.Threading;
+using System.Threading.Tasks;
 using ProtoBuf;
 using SteamKit2.Internal;
 
@@ -30,6 +31,7 @@ namespace SteamKit2
 
         object callbackLock = new object();
         Queue<ICallbackMsg> callbackQueue;
+        private SemaphoreSlim _semaphoreSlim;
 
         Dictionary<EMsg, Action<IPacketMsg>> dispatchMap;
 
@@ -73,6 +75,7 @@ namespace SteamKit2
             : base( configuration, identifier )
         {
             callbackQueue = new Queue<ICallbackMsg>();
+            _semaphoreSlim = new SemaphoreSlim( 0 ); // No maximum number of releases
 
             this.handlers = new OrderedDictionary();
 
@@ -222,6 +225,27 @@ namespace SteamKit2
                 return callbackQueue.Peek();
             }
         }
+
+        /// <summary>
+        /// Blocks the calling task until a callback object is posted to the queue, and frees it.
+        /// </summary>
+        /// <param name="timeout">The length of time to block.</param>
+        /// <returns>A callback object from the queue if a callback has been posted, or null if the timeout has elapsed.</returns>
+        public async Task<ICallbackMsg?> WaitForCallbackAsync( CancellationToken cancellationToken )
+        {
+            // Always await for a release first
+            //  -> When a callback has just posted to the queue,
+            //      it'll immediately return the result
+            //      -> If it's already released, it won't block
+            //          task until another callback is posted
+            await _semaphoreSlim.WaitAsync( cancellationToken );
+
+            lock ( callbackLock )
+            {
+                return callbackQueue.Dequeue();
+            }
+        }
+
         /// <summary>
         /// Blocks the calling thread until a callback object is posted to the queue, and optionally frees it.
         /// </summary>
@@ -312,6 +336,8 @@ namespace SteamKit2
             {
                 callbackQueue.Enqueue( msg );
                 Monitor.Pulse( callbackLock );
+                // Release it as many times as callbacks we have
+                _semaphoreSlim.Release();
             }
 
             jobManager.TryCompleteJob( msg.JobID, msg );
